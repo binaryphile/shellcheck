@@ -19,6 +19,8 @@
 -}
 import qualified ShellCheck.Analyzer
 import           ShellCheck.Checker
+import           ShellCheck.Checks.Custom.Base (CustomCheck)
+import           ShellCheck.Checks.Custom.Loader (loadPlugins)
 import           ShellCheck.Data
 import           ShellCheck.Interface
 import           ShellCheck.Regex
@@ -133,6 +135,9 @@ options = [
         "The number of wiki links to show, when applicable",
     Option "x" ["external-sources"]
         (NoArg $ Flag "externals" "true") "Allow 'source' outside of FILES",
+    Option "" ["plugin-dir"]
+        (ReqArg (Flag "plugin-dir") "DIR")
+        "Load plugins from DIR (default: $XDG_DATA_HOME/shellcheck/plugins)",
     Option "" ["help"]
         (NoArg $ Flag "help" "true") "Show this usage summary and exit"
     ]
@@ -194,7 +199,21 @@ main = do
     let args = envOpts ++ params
     status <- toStatus $ do
         (flags, files) <- parseArguments args
-        process flags files
+        -- Handle flags that don't need plugins before loading them
+        handleEarlyFlags flags
+        pluginDir <- case getOption flags "plugin-dir" of
+            Just dir -> return dir
+            Nothing -> do
+                xdgData <- liftIO $ getXdgDirectory XdgData "shellcheck"
+                return $ xdgData </> "plugins"
+        loadedPlugins <- liftIO $ do
+            result <- try $ loadPlugins pluginDir
+            case result :: Either IOException [CustomCheck] of
+                Right ps -> return ps
+                Left ex -> do
+                    hPutStrLn stderr $ "Warning: plugin loading failed: " ++ show ex
+                    return []
+        process loadedPlugins flags files
     exitWith $ statusToCode status
 
 statusToCode status =
@@ -205,9 +224,9 @@ statusToCode status =
         SupportFailure   -> ExitFailure 4
         RuntimeException -> ExitFailure 2
 
-process :: [Flag] -> [FilePath] -> ExceptT Status IO Status
-process flags files = do
-    options <- foldM (flip parseOption) defaultOptions flags
+process :: [CustomCheck] -> [Flag] -> [FilePath] -> ExceptT Status IO Status
+process loadedPlugins flags files = do
+    options <- foldM (flip (parseOption loadedPlugins)) defaultOptions flags
     verifyFiles files
     let format = fromMaybe "tty" $ getOption flags "format"
     let formatters = formats $ formatterOptions options
@@ -221,11 +240,11 @@ process flags files = do
               where write s = "  " ++ s
             Just f -> ExceptT $ fmap Right f
     sys <- lift $ ioInterface options files
-    lift $ runFormatter sys formatter options files
+    lift $ runFormatter loadedPlugins sys formatter options files
 
-runFormatter :: SystemInterface IO -> Formatter -> Options -> [FilePath]
+runFormatter :: [CustomCheck] -> SystemInterface IO -> Formatter -> Options -> [FilePath]
             -> IO Status
-runFormatter sys format options files = do
+runFormatter loadedPlugins sys format options files = do
     header format
     result <- foldM f NoProblems files
     footer format
@@ -251,7 +270,7 @@ runFormatter sys format options files = do
                 csFilename = filename,
                 csScript = contents
             }
-            result <- checkScript sys checkspec
+            result <- checkScript loadedPlugins sys checkspec
             onResult format result sys
             return $
                 if null (crComments result)
@@ -281,7 +300,7 @@ parseSeverityOption value =
         ("style",   StyleC)
         ]
 
-parseOption flag options =
+parseOption loadedPlugins flag options =
     case flag of
         Flag "shell" str ->
             fromMaybe (die $ "Unknown shell: " ++ str) $ do
@@ -313,17 +332,13 @@ parseOption flag options =
                 }
             }
 
-        Flag "version" _ -> do
-            liftIO printVersion
-            throwError NoProblems
+        -- "version" handled early by handleEarlyFlags (before plugin loading)
 
         Flag "list-optional" _ -> do
-            liftIO printOptional
+            liftIO $ printOptional loadedPlugins
             throwError NoProblems
 
-        Flag "help" _ -> do
-            liftIO $ putStrLn getUsageInfo
-            throwError NoProblems
+        -- "help" handled early by handleEarlyFlags (before plugin loading)
 
         Flag "externals" _ ->
             return options {
@@ -394,8 +409,9 @@ parseOption flag options =
                 }
             }
 
-        -- This flag is handled specially in 'process'
+        -- These flags are handled specially in 'main'/'process'
         Flag "format" _ -> return options
+        Flag "plugin-dir" _ -> return options
 
         Flag str _ -> do
             printErr $ "Internal error for --" ++ str ++ ". Please file a bug :("
@@ -623,10 +639,21 @@ printVersion = do
     putStrLn   "license: GNU General Public License, version 3"
     putStrLn   "website: https://www.shellcheck.net"
 
-printOptional = do
+-- Handle --help and --version before plugin loading, preserving left-to-right flag order.
+handleEarlyFlags :: [Flag] -> ExceptT Status IO ()
+handleEarlyFlags [] = return ()
+handleEarlyFlags (Flag "help" _:_) = do
+    liftIO $ putStrLn getUsageInfo
+    throwError NoProblems
+handleEarlyFlags (Flag "version" _:_) = do
+    liftIO printVersion
+    throwError NoProblems
+handleEarlyFlags (_:rest) = handleEarlyFlags rest
+
+printOptional loadedPlugins = do
     mapM f list
   where
-    list = sortOn cdName ShellCheck.Analyzer.optionalChecks
+    list = sortOn cdName (ShellCheck.Analyzer.optionalChecks loadedPlugins)
     f item = do
         putStrLn $ "name:    " ++ cdName item
         putStrLn $ "desc:    " ++ cdDescription item

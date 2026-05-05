@@ -99,7 +99,7 @@ import qualified Data.Set as S
 -- Run all of ShellCheck (minus output formatters)
 shellcheckString :: String -> CheckResult
 shellcheckString scriptString =
-    runIdentity $ checkScript dummySystemInterface checkSpec
+    runIdentity $ checkScript [] dummySystemInterface checkSpec
   where
     checkSpec :: CheckSpec
     checkSpec = emptyCheckSpec {

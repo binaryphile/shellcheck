@@ -22,6 +22,7 @@ module ShellCheck.Checker (checkScript, ShellCheck.Checker.runTests) where
 
 import ShellCheck.Analyzer
 import ShellCheck.ASTLib
+import ShellCheck.Checks.Custom.Base (CustomCheck)
 import ShellCheck.Interface
 import ShellCheck.Parser
 
@@ -62,8 +63,8 @@ shellFromFilename filename = listToMaybe candidates
     candidates =
         [sh | (ext,sh) <- shellExtensions, ext `isSuffixOf` filename]
 
-checkScript :: Monad m => SystemInterface m -> CheckSpec -> m CheckResult
-checkScript sys spec = do
+checkScript :: Monad m => [CustomCheck] -> SystemInterface m -> CheckSpec -> m CheckResult
+checkScript loadedPlugins sys spec = do
     results <- checkScript (csScript spec)
     return emptyCheckResult {
         crFilename = csFilename spec,
@@ -93,7 +94,7 @@ checkScript sys spec = do
                 } where as = newAnalysisSpec root
         let analysisMessages =
                 maybe []
-                    (arComments . analyzeScript . analysisSpec)
+                    (arComments . analyzeScript loadedPlugins . analysisSpec)
                         $ prRoot result
         let translator = tokenToPosition tokenPositions
         return . nub . sortMessages . filter shouldInclude $
@@ -123,7 +124,7 @@ checkScript sys spec = do
 
 getErrors sys spec =
     sort . map getCode . crComments $
-        runIdentity (checkScript sys spec)
+        runIdentity (checkScript [] sys spec)
   where
     getCode = cCode . pcComment
 

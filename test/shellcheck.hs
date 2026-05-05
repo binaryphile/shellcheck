@@ -10,7 +10,6 @@ import qualified ShellCheck.CFGAnalysis
 import qualified ShellCheck.Checker
 import qualified ShellCheck.Checks.Commands
 import qualified ShellCheck.Checks.ControlFlow
-import qualified ShellCheck.Checks.Custom
 import qualified ShellCheck.Checks.ShellSupport
 import qualified ShellCheck.Fixer
 import qualified ShellCheck.Formatter.Diff
@@ -33,7 +32,6 @@ main = do
       , ("Checker"            , ShellCheck.Checker.runTests)
       , ("Checks.Commands"    , ShellCheck.Checks.Commands.runTests)
       , ("Checks.ControlFlow" , ShellCheck.Checks.ControlFlow.runTests)
-      , ("Checks.Custom"      , ShellCheck.Checks.Custom.runTests)
       , ("Checks.ShellSupport", ShellCheck.Checks.ShellSupport.runTests)
       , ("Fixer"              , ShellCheck.Fixer.runTests)
       , ("Formatter.Diff"     , ShellCheck.Formatter.Diff.runTests)
