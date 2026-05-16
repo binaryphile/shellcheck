@@ -3,6 +3,12 @@
 
 # ShellCheck - A shell script static analysis tool
 
+> **About this fork.** This is a fork of [koalaman/shellcheck](https://github.com/koalaman/shellcheck) that adds **dynamic plugin loading**: external custom checks compiled as shared libraries (`.so`) are discovered at startup from `$XDG_DATA_HOME/shellcheck/plugins/` (or `--plugin-dir DIR`). Plugins participate in `--enable=`, `--list-optional`, and inline suppression like built-in checks.
+>
+> See [`docs/plugins.md`](docs/plugins.md) for the plugin author guide and [`docs/design.md`](docs/design.md) for the architecture. An example plugin (SC9001–SC9006 enforcing an `IFS`/`noglob` bash style) is at [`binaryphile/shellcheck-convention-plugin`](https://github.com/binaryphile/shellcheck-convention-plugin).
+>
+> Everything below is the upstream README.
+
 ShellCheck is a GPLv3 tool that gives warnings and suggestions for bash/sh shell scripts:
 
 ![Screenshot of a terminal showing problematic shell script lines highlighted](doc/terminal.png)
