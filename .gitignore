@@ -24,5 +24,10 @@ stack.yaml.lock
 *.snap
 /dist-newstyle/
 
+### Nix ###
+/result
+/result-*
+
 ### misc ###
 /shellcheck.1
+/.shellcheckrc
