@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-
     Dynamic plugin loader for the ShellCheck custom check system.
-    See docs/design.md section 1.6 for architecture details.
+    See docs/design.md ("Dynamic Plugin Loading") for architecture details.
 
     On platforms with dlopen (Linux, macOS), scans a plugin directory at
     startup, loads shared libraries, verifies API version, and returns

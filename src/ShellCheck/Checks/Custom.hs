@@ -1,7 +1,7 @@
 {-
     Compositor for the ShellCheck custom check plugin system.
     Loads external checks dynamically from shared libraries at startup.
-    See docs/plugins.md for architecture details.
+    See docs/design.md ("Compositor") for architecture details.
 -}
 module ShellCheck.Checks.Custom (checker, optionalChecks) where
 

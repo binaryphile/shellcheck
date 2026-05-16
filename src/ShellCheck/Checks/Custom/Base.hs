@@ -1,6 +1,6 @@
 {-
     Plugin API for the ShellCheck custom check system.
-    See docs/design.md section 1 for architecture details.
+    See docs/design.md ("Plugin System Architecture") for architecture details.
 
     This module provides the registration type, test helpers, and generic
     AST utilities needed by any custom check. Domain-specific helpers
