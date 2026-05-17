@@ -3344,12 +3344,63 @@ prop_readScript5 = isOk readScript "#!/bin/bash\n#This is an empty script\n\n"
 prop_readScript6 = isOk readScript "#!/usr/bin/env -S X=FOO bash\n#This is an empty script\n\n"
 prop_readScript7 = isOk readScript "#!/bin/zsh\n# shellcheck disable=SC1071\nfor f (a b); echo $f\n"
 
--- T_Comment scaffolding tests. The full splice into AST body lists is
--- staged for a follow-up cycle (see TODO in readScriptFile below); these
--- verify that adding T_Comment as a constructor + bumping pluginApiVersion
--- doesn't regress existing parser behavior.
+-- T_Comment splice contract tests (#7469). Comments at body-list
+-- positions splice into the enclosing body list; comments inside
+-- command substitutions and heredoc bodies are dropped.
+
 prop_annotationStillParsesClean =
     isOk readScript "# shellcheck disable=SC1234\necho x\n"
+prop_annotationStillRoundTrips =
+    not $ hasAnyComment "# shellcheck disable=SC1234\necho x\n"
+prop_commentInScriptBody =
+    hasCommentInBody bodyOfScript "# foo" "#!/bin/sh\n# foo\necho bar\n"
+prop_commentInBraceGroup =
+    hasCommentInBody bodyOfBraceGroup "# inner" "f() { # inner\n  :; }\n"
+prop_commentInSubshell =
+    hasCommentInBody bodyOfSubshell "# inner" "( # inner\n  :;\n)\n"
+prop_commentDroppedInDollarSub =
+    not $ hasAnyComment "x=$(# inner\necho a)\n"
+prop_commentDroppedInHereDoc =
+    not $ hasAnyComment "cat <<EOF\n# not a comment\nEOF\n"
+
+parseStringRoot :: String -> Maybe Token
+parseStringRoot src =
+    prRoot $ runIdentity $
+        parseScript (mockedSystemInterface []) newParseSpec {
+            psFilename = "t", psScript = src
+        }
+
+everyToken :: Token -> [Token]
+everyToken t@(OuterToken _ inner) = t : concatMap everyToken (toList inner)
+
+hasAnyComment :: String -> Bool
+hasAnyComment src =
+    case parseStringRoot src of
+        Just root -> not . null $ [s | T_Comment _ s <- everyToken root]
+        Nothing   -> False
+
+hasCommentInBody :: (Token -> Maybe [Token]) -> String -> String -> Bool
+hasCommentInBody getBody needle src =
+    case parseStringRoot src of
+        Just root -> any (containsNeedle needle) $
+                         mapMaybe getBody (everyToken root)
+        Nothing   -> False
+  where
+    containsNeedle n body = any (matchComment n) body
+    matchComment n (T_Comment _ s) = s == n
+    matchComment _ _               = False
+
+bodyOfScript :: Token -> Maybe [Token]
+bodyOfScript (T_Script _ _ body) = Just body
+bodyOfScript _                   = Nothing
+
+bodyOfBraceGroup :: Token -> Maybe [Token]
+bodyOfBraceGroup (T_BraceGroup _ body) = Just body
+bodyOfBraceGroup _                     = Nothing
+
+bodyOfSubshell :: Token -> Maybe [Token]
+bodyOfSubshell (T_Subshell _ body) = Just body
+bodyOfSubshell _                   = Nothing
 
 readScriptFile sourced = do
     start <- startSpan
@@ -3393,18 +3444,10 @@ readScriptFile sourced = do
                                     T_Script id shebang commands
                     userstate <- getState
                     let withHereDocs = reattachHereDocs script (hereDocMap userstate)
-                    -- TODO(#6446 follow-up): attachComments splice is
-                    -- written but currently regresses checkCommandIs-
-                    -- Unreachable, prop_filewideAnnotation*, and
-                    -- prop_commentDisables* checker tests. Existing
-                    -- checks assume T_Script body contains only
-                    -- "actionable" tokens. Audit and update needed.
-                    -- For now: parser logs comments to pendingComments
-                    -- but they're not spliced into the AST.
-                    -- let withComments = attachComments (positionMap userstate)
-                    --                                    (pendingComments userstate)
-                    --                                    withHereDocs
-                    reparseIndices withHereDocs
+                    let withComments = attachComments (positionMap userstate)
+                                                       (pendingComments userstate)
+                                                       withHereDocs
+                    reparseIndices withComments
                 else do
                     many anyChar
                     id <- endSpan start
@@ -3653,9 +3696,13 @@ attachComments posMap rawPending root =
     cStart (cid, _) = fst (posMap Map.! cid)
 
     -- Map each comment to its deepest body-list-container; comments
-    -- without a body-list owner are dropped.
+    -- without a body-list owner are dropped. `flip (++)` preserves
+    -- source order across multiple comments sharing one owner
+    -- (`fromListWith f new old` would otherwise reverse them; the
+    -- combined list must stay ascending by start position because
+    -- `interleave` consumes it head-first).
     owners :: Map.Map Id [(Id, String)]
-    owners = Map.fromListWith (++)
+    owners = Map.fromListWith (flip (++))
         [ (ownerId, [c])
         | c@(cid, _) <- pending
         , Just ownerId <- [findOwner (fst (posMap Map.! cid)) root]
@@ -3669,13 +3716,18 @@ attachComments posMap rawPending root =
     --   NoMatch    — pos is not in any meaningful container at this
     --                subtree (e.g. inside a degenerate leaf range);
     --                the caller's body-list container can claim
+    -- Descend into every child unconditionally; do NOT pre-filter by
+    -- posInRange. Some intermediary tokens (T_Redirecting,
+    -- T_SimpleCommand) register only the leading-token range and do
+    -- not span their inner expression (e.g. the T_DollarExpansion in
+    -- `x=$(...)`). Filtering by parent range would stop descent
+    -- before reaching the inner drop-context. Subtrees that don't
+    -- contain the comment harmlessly return NoMatch.
     findOwnerV :: SourcePos -> Token -> Verdict
     findOwnerV pos t@(OuterToken tid inner)
       | isDropContext t && posInRange pos tid = DropIt
       | otherwise =
-          let childResults =
-                [ findOwnerV pos c
-                | c <- toList inner, posInRange pos (getId c) ]
+          let childResults = [ findOwnerV pos c | c <- toList inner ]
               firstOwned   = listToMaybe [ o | OwnedBy o <- childResults ]
               anyDropped   = any (== DropIt) childResults
           in case firstOwned of

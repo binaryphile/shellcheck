@@ -174,12 +174,19 @@ docBodyLists (T_ForArithmetic _ _ _ _ b)               = [b]
 docBodyLists (T_SelectIn _ _ _ b)                      = [b]
 docBodyLists _                                         = []
 
--- | getDocCommentsBefore scaffolding tests. The full T_Comment splice
--- needed to make these return non-empty results is staged for follow-up
--- (see Parser.hs TODO). This test verifies the accessor returns [] when
--- no T_Comment nodes are in the tree, which is the current state.
+-- | getDocCommentsBefore contract tests (#7469). Tests cover the
+-- accessor's strict line-adjacency rule for the doc-comment block
+-- immediately preceding a T_Function.
 prop_docCommentsBefore_noneWhenNoComments =
     docCommentsForFirstFunction "foo() { :; }\n" == []
+prop_docCommentsBefore_basic =
+    docCommentsForFirstFunction "# doc\nfoo() { :; }\n" == ["# doc"]
+prop_docCommentsBefore_block =
+    docCommentsForFirstFunction "# a\n# b\nfoo() { :; }\n" == ["# a", "# b"]
+prop_docCommentsBefore_gap =
+    docCommentsForFirstFunction "# a\n\n# b\nfoo() { :; }\n" == ["# b"]
+prop_docCommentsBefore_otherStmtBetween =
+    docCommentsForFirstFunction "# a\necho hi\n# b\nfoo() { :; }\n" == ["# b"]
 
 -- Test helper: parse src, find first T_Function, return getDocCommentsBefore.
 docCommentsForFirstFunction :: String -> [String]

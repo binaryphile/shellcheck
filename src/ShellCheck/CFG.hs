@@ -893,6 +893,7 @@ build t = do
         T_Greater _ -> none
         T_Less _ -> none
         T_ParamSubSpecialChar _ _ -> none
+        T_Comment _ _ -> none
 
         x -> do
             error ("Unimplemented: " ++ show x) -- STRIP

@@ -52,10 +52,11 @@ These wrap the check into a `Checker` and use `producesComments` from AnalyzerLi
 
 ### 1.5 AST Utilities (Base.hs)
 
-Generic utilities needed by any plugin examining variable expansions or quoting:
+Generic utilities needed by any plugin examining variable expansions, quoting, or comment context:
 
 - `getExpansionName :: Token -> Maybe String` — extract variable name from `T_DollarBraced`
 - `isInRedirectContext :: Map Id Token -> Token -> Bool` — workaround for `isQuoteFree` not recognizing `T_FdRedirect` in ancestor traversal
+- `getDocCommentsBefore :: Parameters -> Token -> [String]` — the contiguous `T_Comment` block immediately preceding a target token within its enclosing body list (strict line-adjacency; blank lines or non-comment siblings terminate the block). Backed by the parser's `attachComments` splice, which inserts `T_Comment` nodes into body lists and drops comments inside command-substitution / heredoc bodies.
 
 **Scaling guard**: If AST utilities grow beyond ~5 functions, extract into `Custom/ASTUtils.hs`.
 

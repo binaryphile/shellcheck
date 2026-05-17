@@ -250,6 +250,28 @@ myCheck token = do
     -- ancestors is a list from immediate parent to root
 ```
 
+### Reading comments
+
+Non-directive `#`-comments are retained as `T_Comment id String`
+nodes spliced into body lists (script body, brace groups, function
+and loop bodies). Comments inside command substitutions and
+heredoc bodies are intentionally dropped — they don't reach the
+plugin. Use `getDocCommentsBefore` to grab the contiguous comment
+block immediately above a target token (strict line-adjacency; a
+blank line or any non-comment sibling terminates the block):
+
+```haskell
+import ShellCheck.Checks.Custom.Base (getDocCommentsBefore)
+
+myCheck token@(T_Function {}) = do
+    params <- ask
+    case getDocCommentsBefore params token of
+        []       -> return ()  -- no doc-comment block
+        comments -> -- comments :: [String] in source order
+            return ()
+myCheck _ = return ()
+```
+
 ## Nix Flake Template
 
 ```nix
