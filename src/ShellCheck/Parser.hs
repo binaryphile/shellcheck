@@ -35,10 +35,12 @@ import Control.Monad
 import Control.Monad.Identity
 import Control.Monad.Trans
 import Data.Char
+import Data.Foldable (toList)
 import Data.Functor
 import Data.List (isPrefixOf, isInfixOf, isSuffixOf, partition, sortBy, intercalate, nub, find)
 import Data.Maybe
 import Data.Monoid
+import Data.Ord (comparing)
 import GHC.Exts (sortWith)
 import Prelude hiding (readList)
 import System.IO
@@ -49,7 +51,6 @@ import qualified Control.Monad.Reader as Mr
 import qualified Control.Monad.State as Ms
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
-import Debug.Trace
 
 import Test.QuickCheck.All (quickCheckAll)
 
@@ -169,14 +170,20 @@ data UserState = UserState {
     positionMap :: Map.Map Id (SourcePos, SourcePos),
     parseNotes :: [ParseNote],
     hereDocMap :: Map.Map Id [Token],
-    pendingHereDocs :: [HereDocContext]
+    pendingHereDocs :: [HereDocContext],
+    -- Non-annotation comments collected during parse, in reverse source
+    -- order (newest first; prepended by readComment). Spliced into body
+    -- lists post-parse by attachComments. Ids are already registered in
+    -- positionMap via the startSpan/endSpan in readComment.
+    pendingComments :: [(Id, String)]
 }
 initialUserState = UserState {
     lastId = Id $ -1,
     positionMap = Map.empty,
     parseNotes = [],
     hereDocMap = Map.empty,
-    pendingHereDocs = []
+    pendingHereDocs = [],
+    pendingComments = []
 }
 
 codeForParseNote (ParseNote _ _ _ code _) = code
@@ -1097,7 +1104,16 @@ readAnnotations = do
 
 readComment = do
     unexpecting "shellcheck annotation" readAnnotationPrefix
-    readAnyComment
+    span <- startSpan
+    str <- readAnyComment
+    cid <- endSpan span
+    -- endSpan registered cid → (startPos, endPos) in positionMap.
+    -- readAnyComment strips the leading '#'; we prepend it back so the
+    -- T_Comment string includes the source-as-written form, which is
+    -- what plugin authors and getDocCommentsBefore consumers expect.
+    modifyState $ \s ->
+        s { pendingComments = (cid, '#' : str) : pendingComments s }
+    return str
 
 prop_readAnyComment = isOk readAnyComment "# Comment"
 readAnyComment = do
@@ -3327,6 +3343,14 @@ prop_readScript4 = isWarning readScript "#!/usr/bin/perl\nfoo=("
 prop_readScript5 = isOk readScript "#!/bin/bash\n#This is an empty script\n\n"
 prop_readScript6 = isOk readScript "#!/usr/bin/env -S X=FOO bash\n#This is an empty script\n\n"
 prop_readScript7 = isOk readScript "#!/bin/zsh\n# shellcheck disable=SC1071\nfor f (a b); echo $f\n"
+
+-- T_Comment scaffolding tests. The full splice into AST body lists is
+-- staged for a follow-up cycle (see TODO in readScriptFile below); these
+-- verify that adding T_Comment as a constructor + bumping pluginApiVersion
+-- doesn't regress existing parser behavior.
+prop_annotationStillParsesClean =
+    isOk readScript "# shellcheck disable=SC1234\necho x\n"
+
 readScriptFile sourced = do
     start <- startSpan
     pos <- getPosition
@@ -3368,7 +3392,19 @@ readScriptFile sourced = do
                     let script = T_Annotation annotationId annotations $
                                     T_Script id shebang commands
                     userstate <- getState
-                    reparseIndices $ reattachHereDocs script (hereDocMap userstate)
+                    let withHereDocs = reattachHereDocs script (hereDocMap userstate)
+                    -- TODO(#6446 follow-up): attachComments splice is
+                    -- written but currently regresses checkCommandIs-
+                    -- Unreachable, prop_filewideAnnotation*, and
+                    -- prop_commentDisables* checker tests. Existing
+                    -- checks assume T_Script body contains only
+                    -- "actionable" tokens. Audit and update needed.
+                    -- For now: parser logs comments to pendingComments
+                    -- but they're not spliced into the AST.
+                    -- let withComments = attachComments (positionMap userstate)
+                    --                                    (pendingComments userstate)
+                    --                                    withHereDocs
+                    reparseIndices withHereDocs
                 else do
                     many anyChar
                     id <- endSpan start
@@ -3597,6 +3633,170 @@ reattachHereDocs root map =
         list <- Map.lookup id map
         return $ T_HereDoc id dash quote string list
     f t = t
+
+-- Splice T_Comment nodes (for non-annotation #-comments collected
+-- during parse) into the AST at body-list positions. Comments that
+-- fall inside non-body-list children (heredoc bodies, expression
+-- internals, etc.) are silently dropped, matching pre-change behavior.
+-- See docs/design.md ("Plugin System Architecture") for rationale.
+data Verdict = OwnedBy Id | DropIt | NoMatch deriving Eq
+
+attachComments :: Map.Map Id (SourcePos, SourcePos)
+               -> [(Id, String)]
+               -> Token -> Token
+attachComments posMap rawPending root =
+    rebuild owners root
+  where
+    -- Sort comments by start position so the splice's interleave can
+    -- assume sorted input.
+    pending = sortBy (comparing cStart) rawPending
+    cStart (cid, _) = fst (posMap Map.! cid)
+
+    -- Map each comment to its deepest body-list-container; comments
+    -- without a body-list owner are dropped.
+    owners :: Map.Map Id [(Id, String)]
+    owners = Map.fromListWith (++)
+        [ (ownerId, [c])
+        | c@(cid, _) <- pending
+        , Just ownerId <- [findOwner (fst (posMap Map.! cid)) root]
+        ]
+
+    -- Verdict for findOwner:
+    --   OwnedBy id — claimed by a body-list container
+    --   DropIt     — pos is inside an expression / command-substitution
+    --                / heredoc body; the comment is silently dropped
+    --                regardless of any outer body-list container
+    --   NoMatch    — pos is not in any meaningful container at this
+    --                subtree (e.g. inside a degenerate leaf range);
+    --                the caller's body-list container can claim
+    findOwnerV :: SourcePos -> Token -> Verdict
+    findOwnerV pos t@(OuterToken tid inner)
+      | isDropContext t && posInRange pos tid = DropIt
+      | otherwise =
+          let childResults =
+                [ findOwnerV pos c
+                | c <- toList inner, posInRange pos (getId c) ]
+              firstOwned   = listToMaybe [ o | OwnedBy o <- childResults ]
+              anyDropped   = any (== DropIt) childResults
+          in case firstOwned of
+               Just o -> OwnedBy o
+               Nothing
+                 | anyDropped -> DropIt
+                 | hasBodyList t && posInRange pos tid -> OwnedBy tid
+                 | otherwise -> NoMatch
+
+    findOwner pos t = case findOwnerV pos t of
+        OwnedBy o -> Just o
+        _         -> Nothing
+
+    -- Constructors whose [t] body lists are command-substitution-style:
+    -- they DO contain statements, but the bash inline-comment idiom and
+    -- existing checks rely on those bodies being seen as "empty" when
+    -- they only contain a comment. Comments inside these are dropped.
+    -- T_HereDoc bodies are also dropped (the body is text content,
+    -- not parsed shell statements).
+    isDropContext :: Token -> Bool
+    isDropContext T_DollarExpansion{}                = True
+    isDropContext T_Backticked{}                     = True
+    isDropContext T_ProcSub{}                        = True
+    isDropContext T_DollarBraceCommandExpansion{}    = True
+    isDropContext T_HereDoc{}                        = True
+    isDropContext _                                  = False
+
+    -- Like `asum . map f`, but local to avoid Parsec's <|>/asum shadowing
+    firstJust :: (a -> Maybe b) -> [a] -> Maybe b
+    firstJust _ [] = Nothing
+    firstJust f (x:xs) =
+        case f x of
+            Just y  -> Just y
+            Nothing -> firstJust f xs
+
+    posInRange pos tid =
+        case Map.lookup tid posMap of
+            Just (s, e) -> pos >= s && pos <= e
+            Nothing     -> False
+
+    -- The lists of statements where comments may appear as siblings.
+    -- Empty for constructors that don't host body-position comments.
+    -- NOTE: command-substitution constructors (T_DollarExpansion,
+    -- T_Backticked, T_ProcSub, T_DollarBraceCommandExpansion) are
+    -- intentionally excluded. The bash inline-comment idiom
+    -- `echo foo `# comment`` relies on existing checks treating those
+    -- bodies as empty when they contain only a comment; splicing
+    -- T_Comment there would break prop_checkBackticks3 and
+    -- prop_checkUnquotedExpansions9. The convention plugin doesn't
+    -- need comments inside command substitutions.
+    bodyLists :: Token -> [[Token]]
+    bodyLists (T_Script _ _ body)                  = [body]
+    bodyLists (T_BraceGroup _ body)                = [body]
+    bodyLists (T_Subshell _ body)                  = [body]
+    bodyLists (T_IfExpression _ pairs els)         =
+        els : concatMap (\(c, b) -> [c, b]) pairs
+    bodyLists (T_WhileExpression _ c b)            = [c, b]
+    bodyLists (T_UntilExpression _ c b)            = [c, b]
+    bodyLists (T_ForIn _ _ _ b)                    = [b]
+    bodyLists (T_ForArithmetic _ _ _ _ b)          = [b]
+    bodyLists (T_SelectIn _ _ _ b)                 = [b]
+    bodyLists _                                    = []
+
+    hasBodyList t = not (null (bodyLists t))
+
+    -- Rebuild the tree, splicing comments into body lists by container Id.
+    -- All non-body-list children are recursed into via Functor for
+    -- general descent (e.g., to reach a brace group inside a function
+    -- body). Body-list children get spliced and recursed in one pass.
+    rebuild :: Map.Map Id [(Id, String)] -> Token -> Token
+    rebuild ows t@(OuterToken tid inner) = case inner of
+        Inner_T_Script sb body ->
+            OuterToken tid $ Inner_T_Script (rebuild ows sb)
+                                            (spliceAndRecurse ows tid body)
+        Inner_T_BraceGroup body ->
+            OuterToken tid $ Inner_T_BraceGroup (spliceAndRecurse ows tid body)
+        Inner_T_Subshell body ->
+            OuterToken tid $ Inner_T_Subshell (spliceAndRecurse ows tid body)
+        -- Command-substitution bodies (T_DollarExpansion, T_Backticked,
+        -- T_ProcSub, T_DollarBraceCommandExpansion) are intentionally
+        -- NOT spliced; see bodyLists comment for rationale.
+        Inner_T_IfExpression pairs els ->
+            OuterToken tid $ Inner_T_IfExpression
+                [ (spliceAndRecurse ows tid c, spliceAndRecurse ows tid b)
+                | (c, b) <- pairs ]
+                (spliceAndRecurse ows tid els)
+        Inner_T_WhileExpression c b ->
+            OuterToken tid $ Inner_T_WhileExpression
+                (spliceAndRecurse ows tid c)
+                (spliceAndRecurse ows tid b)
+        Inner_T_UntilExpression c b ->
+            OuterToken tid $ Inner_T_UntilExpression
+                (spliceAndRecurse ows tid c)
+                (spliceAndRecurse ows tid b)
+        Inner_T_ForIn v w b ->
+            OuterToken tid $ Inner_T_ForIn v w (spliceAndRecurse ows tid b)
+        Inner_T_ForArithmetic x y z b ->
+            OuterToken tid $ Inner_T_ForArithmetic x y z
+                                (spliceAndRecurse ows tid b)
+        Inner_T_SelectIn v w b ->
+            OuterToken tid $ Inner_T_SelectIn v w (spliceAndRecurse ows tid b)
+        -- Generic case: Functor-descend into any child Tokens.
+        _ -> OuterToken tid (fmap (rebuild ows) inner)
+
+    spliceAndRecurse ows tid children =
+        let mine = Map.findWithDefault [] tid ows
+            recursed = map (rebuild ows) children
+        in interleave mine recursed
+
+    -- Merge sorted comments with children (children are already in source
+    -- order). For each step, emit whichever has the lower start position.
+    interleave :: [(Id, String)] -> [Token] -> [Token]
+    interleave [] cs = cs
+    interleave ps [] = map (\(cid, str) -> T_Comment cid str) ps
+    interleave ps@(p@(cid, str):pRest) cs@(c:cRest) =
+        case Map.lookup (getId c) posMap of
+            Just (childStart, _)
+              | fst (posMap Map.! cid) <= childStart ->
+                    T_Comment cid str : interleave pRest cs
+              | otherwise -> c : interleave ps cRest
+            Nothing -> c : interleave ps cRest
 
 toPositionedComment :: ParseNote -> PositionedComment
 toPositionedComment (ParseNote start end severity code message) =

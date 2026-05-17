@@ -1,3 +1,4 @@
+{-# LANGUAGE TemplateHaskell #-}
 {-
     Plugin API for the ShellCheck custom check system.
     See docs/design.md ("Plugin System Architecture") for architecture details.
@@ -25,28 +26,35 @@ module ShellCheck.Checks.Custom.Base (
     -- * AST utilities
     getExpansionName,
     isInRedirectContext,
+    getDocCommentsBefore,
     -- * Re-exports for plugin convenience
     -- | These are re-exported so plugin modules don't need to import
     -- Control.Monad and Control.Monad.RWS directly.
     ask,
-    when
+    when,
+    -- * Test runner (auto-discovered prop_ tests)
+    runTests
     ) where
 
 import ShellCheck.AST
-import ShellCheck.ASTLib
-import ShellCheck.AnalyzerLib
+import ShellCheck.ASTLib hiding (runTests)
+import ShellCheck.AnalyzerLib hiding (runTests)
 import ShellCheck.Interface
 
 import Control.Monad (when)
 import Control.Monad.RWS (ask)
+import Data.Foldable (toList)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
+import Data.Maybe (listToMaybe, mapMaybe)
+
+import Test.QuickCheck.All (quickCheckAll)
 
 -- | Plugin API version. Bump when the API changes in incompatible ways.
 -- Plugins can assert against this at compile time if needed:
 --   _ = pluginApiVersion :: Int  -- fails if type changes
 pluginApiVersion :: Int
-pluginApiVersion = 1
+pluginApiVersion = 2
 
 -- | A custom check plugin. Register in Custom.hs's allChecks list.
 data CustomCheck = CustomCheck {
@@ -98,3 +106,102 @@ isInRedirectContext parents t =
   where
     isRedirect (T_FdRedirect {}) = True
     isRedirect _ = False
+
+-- | Doc-comments immediately preceding the given token in its parent's body
+-- list, in source order (top to bottom).
+--
+-- "Immediately preceding" means strict line-adjacency: the comment's end
+-- line must equal the target's start line minus 1, and each comment's start
+-- line must equal the next comment's expected line. Any non-T_Comment
+-- sibling or a blank-line gap terminates the block.
+--
+-- Returns [] if the token has no parent, isn't in a body list, or has no
+-- line-adjacent preceding comments. Matches the bash convention where a
+-- docstring is the contiguous # comment block sitting directly above the
+-- declaration, with no blank line between.
+getDocCommentsBefore :: Parameters -> Token -> [String]
+getDocCommentsBefore params t =
+    -- T_Function (and similar) isn't a direct child of T_Script's body
+    -- — bash statements are wrapped in T_Pipeline → T_Redirecting. Walk
+    -- up the parent chain until we find a token whose parent is a body-
+    -- list container AND that contains the token in a body list.
+    case findBodyMember t of
+        Nothing -> []
+        Just (member, siblings) ->
+            let memberId = getId member
+                memberLine = case Map.lookup memberId (tokenPositions params) of
+                    Just (s, _) -> posLine s
+                    Nothing     -> 0
+                preceding = reverse $ takeWhile ((/= memberId) . getId) siblings
+            in reverse $ collectBlock preceding (memberLine - 1)
+  where
+    findBodyMember :: Token -> Maybe (Token, [Token])
+    findBodyMember tok =
+        case Map.lookup (getId tok) (parentMap params) of
+            Nothing -> Nothing
+            Just parent ->
+                case listToMaybe [ list | list <- docBodyLists parent
+                                        , any ((== getId tok) . getId) list ] of
+                    Just siblings -> Just (tok, siblings)
+                    Nothing       -> findBodyMember parent
+
+    collectBlock [] _ = []
+    collectBlock (sib:rest) expectedLine =
+        case sib of
+            T_Comment cid str ->
+                case Map.lookup cid (tokenPositions params) of
+                    Just (start, end)
+                      | posLine end == expectedLine ->
+                            str : collectBlock rest (posLine start - 1)
+                    _ -> []
+            _ -> []
+
+-- | Body lists where doc-comments may live as siblings. Mirrors the
+-- splice scope in Parser.attachComments (kept in sync there).
+-- Command-substitution constructors (T_DollarExpansion, T_Backticked,
+-- T_ProcSub, T_DollarBraceCommandExpansion) are intentionally omitted
+-- to preserve the bash inline-comment idiom.
+docBodyLists :: Token -> [[Token]]
+docBodyLists (T_Script _ _ body)                       = [body]
+docBodyLists (T_BraceGroup _ body)                     = [body]
+docBodyLists (T_Subshell _ body)                       = [body]
+docBodyLists (T_IfExpression _ pairs els)              =
+    els : concatMap (\(c, b) -> [c, b]) pairs
+docBodyLists (T_WhileExpression _ c b)                 = [c, b]
+docBodyLists (T_UntilExpression _ c b)                 = [c, b]
+docBodyLists (T_ForIn _ _ _ b)                         = [b]
+docBodyLists (T_ForArithmetic _ _ _ _ b)               = [b]
+docBodyLists (T_SelectIn _ _ _ b)                      = [b]
+docBodyLists _                                         = []
+
+-- | getDocCommentsBefore scaffolding tests. The full T_Comment splice
+-- needed to make these return non-empty results is staged for follow-up
+-- (see Parser.hs TODO). This test verifies the accessor returns [] when
+-- no T_Comment nodes are in the tree, which is the current state.
+prop_docCommentsBefore_noneWhenNoComments =
+    docCommentsForFirstFunction "foo() { :; }\n" == []
+
+-- Test helper: parse src, find first T_Function, return getDocCommentsBefore.
+docCommentsForFirstFunction :: String -> [String]
+docCommentsForFirstFunction src =
+    case prRoot pr of
+        Nothing   -> []
+        Just root ->
+            let spec   = defaultSpec pr
+                params = makeParameters spec
+            in case findFirstFunction root of
+                Nothing -> []
+                Just f  -> getDocCommentsBefore params f
+  where
+    pr = pScript src
+
+findFirstFunction :: Token -> Maybe Token
+findFirstFunction t = case t of
+    T_Function {}      -> Just t
+    OuterToken _ inner ->
+        case mapMaybe findFirstFunction (toList inner) of
+            (x:_) -> Just x
+            []    -> Nothing
+
+return []
+runTests = $quickCheckAll
