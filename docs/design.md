@@ -120,11 +120,12 @@ Plugin API stability is best-effort; `pluginApiVersion` bumps signal any incompa
 | `verify`, `verifyNot`, `verifyCode` | Test helpers. |
 | `getExpansionName` | Returns variable name from `T_DollarBraced`. |
 | `isInRedirectContext` | Provisional; supersedable if `isQuoteFree` learns about `T_FdRedirect`. |
+| `getDocCommentsBefore` | Contiguous `T_Comment` block immediately preceding a target token (strict line-adjacency). Backed by parser splice (added with `pluginApiVersion = 2`). |
 | `ask`, `when` | Re-exported from `Control.Monad.RWS` and `Control.Monad` for plugin convenience. |
 
 Plugin modules should depend on `Base.hs` exports plus `AnalyzerLib` (for the analysis monad and check-emitting functions). Internal functions (like `getCodes`) are not exported and may change freely.
 
-**Versioning**: `pluginApiVersion` (currently 1) is checked at load time. Bump it when the `CustomCheck` type or `Base.hs` exports change incompatibly. Plugins built against an older version fail to load with a clear version mismatch message rather than crashing.
+**Versioning**: `pluginApiVersion` (currently 2) is checked at load time. Bump it when the `CustomCheck` type or `Base.hs` exports change incompatibly. Plugins built against an older version fail to load with a clear version mismatch message rather than crashing.
 
 ### 2.4 Dynamic Loading Constraints
 
