@@ -10,7 +10,9 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
-        shellcheck = pkgs.haskellPackages.callCabal2nix "ShellCheck" self {};
+        shellcheck = pkgs.haskell.lib.dontCheck (pkgs.haskell.lib.dontHaddock (
+          pkgs.haskellPackages.callCabal2nix "ShellCheck" self {}
+        ));
       in {
         packages = {
           default = shellcheck;
