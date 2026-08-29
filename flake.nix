@@ -10,9 +10,24 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
-        shellcheck = pkgs.haskell.lib.dontCheck (pkgs.haskell.lib.dontHaddock (
-          pkgs.haskellPackages.callCabal2nix "ShellCheck" self {}
-        ));
+        # Blanket doHaddock=false across the whole package set
+        # (dotfiles#854101, follow-up to dotfiles#112524's identical fix in
+        # shellcheck-convention-plugin): the prior bare `dontHaddock` below
+        # only stripped ShellCheck's OWN doc output -- its transitive deps
+        # (assoc, colour, prettyprinter, ansi-terminal, optparse-applicative,
+        # hashable, etc.) still built full haddock docs via nixpkgs' default,
+        # since callCabal2nix built against the unmodified base
+        # `pkgs.haskellPackages`. Overriding mkDerivation itself applies to
+        # every package built through this set. Verified: this override's
+        # own assoc.outputs == [out] vs the base set's [out doc].
+        haskellPackages = pkgs.haskellPackages.override {
+          overrides = hself: hsuper: {
+            mkDerivation = args: hsuper.mkDerivation (args // { doHaddock = false; });
+          };
+        };
+        shellcheck = pkgs.haskell.lib.dontCheck (
+          haskellPackages.callCabal2nix "ShellCheck" self {}
+        );
       in {
         packages = {
           default = shellcheck;
